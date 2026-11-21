@@ -1,0 +1,19 @@
+{
+  "name": "yaraci-node-scraper",
+  "version": "1.1.0",
+  "description": "Node.js + Puppeteer SEO Scraper & Baileys WhatsApp microservice for course.yaracienglish.com",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.21.0",
+    "pino": "^9.5.0",
+    "puppeteer": "^23.0.0",
+    "qrcode": "^1.5.4"
+  }
+}
