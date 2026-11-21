@@ -229,12 +229,17 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
               <p class="hint">${state.lastError ? escapeHtml(state.lastError) : 'Status: ' + escapeHtml(state.status) + (shouldAutoRefresh ? ' • Halaman refresh otomatis tiap 5 detik.' : '')}</p>
             </div>`;
 
-      actionsHtml = `
-        <div class="actions">
-          <a href="${escapeHtml(reconnectHref)}" class="btn btn-primary">↻ Scan Ulang / Reconnect</a>
-          <a href="${escapeHtml(logoutHref)}" class="btn btn-danger" onclick="return confirm('Putuskan sesi WhatsApp saat ini dan scan ulang nomor?')">⏻ Logout / Putuskan</a>
-          <a href="${escapeHtml(baseHref)}" class="btn btn-ghost">⟳ Refresh Status</a>
-        </div>`;
+      actionsHtml = state.connected
+        ? `<div class="actions">
+            <a href="https://course.yaracienglish.com" target="_blank" class="btn btn-primary">↗ Buka LMS Yaraci</a>
+            <a href="${escapeHtml(logoutHref)}" class="btn btn-danger" onclick="return confirm('Putuskan sesi WhatsApp saat ini dan scan ulang nomor?')">⏻ Logout / Putuskan</a>
+            <a href="${escapeHtml(baseHref)}" class="btn btn-ghost">⟳ Refresh Status</a>
+          </div>`
+        : `<div class="actions">
+            <a href="${escapeHtml(reconnectHref)}" class="btn btn-primary">↻ Scan Ulang / Reconnect</a>
+            <a href="${escapeHtml(logoutHref)}" class="btn btn-danger" onclick="return confirm('Reset sesi WhatsApp dan buat QR baru?')">⏻ Reset Sesi</a>
+            <a href="${escapeHtml(baseHref)}" class="btn btn-ghost">⟳ Refresh Status</a>
+          </div>`;
     }
 
     res.type('html').send(`<!doctype html>
