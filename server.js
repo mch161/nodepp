@@ -67,7 +67,7 @@ app.get('/', async (req, res) => {
     });
   }
 
-  return renderGatewayPage(req, res, { requireTokenForControls: true });
+  return renderGatewayPage(req, res, { requireTokenForControls: false });
 });
 
 app.get('/health', async (req, res) => {
@@ -156,7 +156,7 @@ app.post('/wa/reconnect', requireAuth, async (req, res) => {
 
 async function renderGatewayPage(req, res, { requireTokenForControls = false } = {}) {
   try {
-    const authorized = isAuthorized(req);
+    const authorized = !requireTokenForControls || isAuthorized(req);
     const action = String(req.query.action || '').toLowerCase();
     let flash = '';
     let errorFlash = '';
@@ -245,51 +245,67 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
   ${shouldAutoRefresh ? `<meta http-equiv="refresh" content="5;url=${escapeHtml(baseHref)}" />` : ''}
   <title>Yaraci English — WhatsApp Gateway</title>
   <style>
+    :root{
+      --colorPrimary:#5ae1f0;
+      --yaraci-cyan:#5ae1f0;
+      --yaraci-pink:#f7c6d2;
+      --yaraci-pink-dark:#831843;
+      --yaraci-amber:#f7b14c;
+      --yaraci-badge-gold-text:#653e00;
+      --yaraci-sky:#0ea5e9;
+      --yaraci-link:#006591;
+      --yaraci-sky-bg:#c9e6ff;
+      --bg-page:#f7f9fb;
+      --surface:#ffffff;
+      --surface-soft:#f8fafc;
+      --text-heading:#191c1e;
+      --text-main:#1f2937;
+      --text-muted:#4b5563;
+      --danger-grad:linear-gradient(0deg,#9c031e 0%,#eb0029 100%);
+    }
     *{box-sizing:border-box}
-    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Inter,system-ui,-apple-system,sans-serif;background:radial-gradient(circle at top right,#0ea5e9 0%,#0f172a 48%,#064e3b 100%);color:#0f172a}
-    .card{width:100%;max-width:480px;background:rgba(255,255,255,.97);border-radius:26px;padding:30px;box-shadow:0 28px 70px rgba(0,0,0,.42);text-align:center;border:1px solid rgba(255,255,255,.5)}
-    .brand-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e2e8f0}
+    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Inter,system-ui,-apple-system,sans-serif;background:radial-gradient(circle at 12% 15%,rgba(90,225,240,.28),transparent 38%),radial-gradient(circle at 88% 18%,rgba(247,198,210,.35),transparent 40%),radial-gradient(circle at 50% 95%,rgba(247,177,76,.22),transparent 42%),var(--bg-page);color:var(--text-main)}
+    .card{width:100%;max-width:480px;background:var(--surface);border-radius:24px;padding:28px;box-shadow:0 20px 50px rgba(25,28,30,.10);text-align:center;border:1.5px solid rgba(90,225,240,.55);position:relative;overflow:hidden}
+    .card::before{content:"";position:absolute;top:0;left:0;right:0;height:5px;background:linear-gradient(90deg,var(--yaraci-cyan) 0%,var(--yaraci-amber) 50%,var(--yaraci-pink) 100%)}
+    .brand-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e5e7eb}
     .brand-left{display:flex;align-items:center;gap:12px;text-align:left}
-    .brand-logo{height:38px;width:auto;max-width:120px;object-fit:contain;border-radius:8px}
-    .brand-text h1{margin:0;font-size:1.05rem;font-weight:800;color:#0f172a;letter-spacing:-.01em}
-    .brand-text small{display:block;color:#059669;font-weight:700;font-size:.76rem;margin-top:2px}
+    .brand-logo{height:40px;width:auto;max-width:130px;object-fit:contain}
+    .brand-text h1{margin:0;font-size:1.05rem;font-weight:800;color:var(--text-heading);letter-spacing:-.01em}
+    .brand-text small{display:block;color:var(--yaraci-link);font-weight:700;font-size:.76rem;margin-top:2px}
     .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;font-size:.74rem;font-weight:700;white-space:nowrap}
     .dot{width:8px;height:8px;border-radius:50%;background:currentColor}
     .badge-online{background:#dcfce7;color:#15803d}
-    .badge-qr{background:#fef9c3;color:#a16207}
-    .badge-wait{background:#e0f2fe;color:#0369a1}
-    .badge-off{background:#fee2e2;color:#b91c1c}
-    .flash{background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;border-radius:12px;padding:10px 12px;font-size:.82rem;margin-bottom:16px}
-    .flash-err{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:12px;padding:10px 12px;font-size:.82rem;margin-bottom:16px}
+    .badge-qr{background:var(--yaraci-amber);color:var(--yaraci-badge-gold-text)}
+    .badge-wait{background:var(--yaraci-sky-bg);color:var(--yaraci-link)}
+    .badge-off{background:var(--yaraci-pink);color:var(--yaraci-pink-dark)}
+    .flash{background:var(--yaraci-sky-bg);border:1px solid var(--yaraci-cyan);color:var(--yaraci-link);border-radius:12px;padding:10px 12px;font-size:.82rem;font-weight:600;margin-bottom:16px}
+    .flash-err{background:var(--yaraci-pink);border:1px solid #f472b6;color:var(--yaraci-pink-dark);border-radius:12px;padding:10px 12px;font-size:.82rem;font-weight:600;margin-bottom:16px}
     .qr-box{padding:6px 0}
-    .qr-frame{display:inline-block;padding:14px;background:linear-gradient(135deg,#ecfdf5,#eff6ff);border:2px solid #a7f3d0;border-radius:20px;box-shadow:0 12px 28px rgba(15,23,42,.08)}
+    .qr-frame{display:inline-block;padding:14px;background:var(--surface-soft);border:2px solid var(--yaraci-cyan);border-radius:20px;box-shadow:0 10px 26px rgba(90,225,240,.25)}
     .qr-img{display:block;width:250px;height:250px;border-radius:12px;background:#fff}
-    .steps{text-align:left;margin:16px auto 0;max-width:340px;padding-left:20px;color:#475569;font-size:.86rem;line-height:1.65}
+    .steps{text-align:left;margin:16px auto 0;max-width:340px;padding-left:20px;color:var(--text-muted);font-size:.86rem;line-height:1.65}
     .connected-box,.lock-box{padding:14px 6px}
-    .check-circle,.wa-icon-circle{width:68px;height:68px;margin:0 auto 14px;border-radius:20px;background:linear-gradient(135deg,#22c55e,#059669);color:#fff;font-size:30px;font-weight:800;display:flex;align-items:center;justify-content:center;box-shadow:0 12px 28px rgba(16,185,129,.35)}
-    .account-pill{display:inline-block;background:#f1f5f9;color:#0f172a;font-weight:700;padding:8px 18px;border-radius:999px;font-size:.94rem;margin:6px 0 10px}
-    .token-form{margin-top:18px;display:flex;flex-direction:column;gap:10px}
-    .token-form input{width:100%;padding:12px 14px;border:1.5px solid #cbd5e1;border-radius:12px;font-size:.9rem;outline:none;transition:border-color .15s}
-    .token-form input:focus{border-color:#0ea5e9;box-shadow:0 0 0 3px rgba(14,165,233,.15)}
+    .check-circle,.wa-icon-circle{width:68px;height:68px;margin:0 auto 14px;border-radius:20px;background:linear-gradient(135deg,var(--yaraci-sky),var(--yaraci-link));color:#fff;font-size:30px;font-weight:800;display:flex;align-items:center;justify-content:center;box-shadow:0 12px 26px rgba(14,165,233,.3)}
+    .account-pill{display:inline-block;background:var(--yaraci-sky-bg);color:var(--yaraci-link);font-weight:700;padding:8px 18px;border-radius:999px;font-size:.94rem;margin:6px 0 10px}
     .loading-box{padding:24px 8px}
-    .spinner{width:44px;height:44px;margin:0 auto 14px;border:4px solid #e2e8f0;border-top-color:#10b981;border-radius:50%;animation:spin .9s linear infinite}
+    .spinner{width:44px;height:44px;margin:0 auto 14px;border:4px solid var(--yaraci-sky-bg);border-top-color:var(--yaraci-sky);border-radius:50%;animation:spin .9s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
-    h2{margin:6px 0;font-size:1.18rem;color:#0f172a}
-    .hint{margin:6px 0 0;color:#64748b;font-size:.85rem;line-height:1.55}
-    .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:22px;padding-top:18px;border-top:1px solid #e2e8f0}
+    h2{margin:6px 0;font-size:1.18rem;color:var(--text-heading)}
+    .hint{margin:6px 0 0;color:var(--text-muted);font-size:.85rem;line-height:1.55}
+    .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:22px;padding-top:18px;border-top:1px solid #e5e7eb}
     .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:11px 14px;border-radius:12px;font-size:.84rem;font-weight:700;text-decoration:none;border:none;cursor:pointer;transition:transform .15s,opacity .15s}
     .btn:hover{transform:translateY(-1px);opacity:.94}
-    .btn-primary{background:linear-gradient(135deg,#0284c7,#0ea5e9);color:#fff}
-    .btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
-    .btn-ghost{grid-column:1/-1;background:#f1f5f9;color:#334155}
-    .footer{margin-top:18px;font-size:.74rem;color:#94a3b8;display:flex;justify-content:space-between;align-items:center;border-top:1px solid #f1f5f9;padding-top:12px}
+    .btn-primary{background:linear-gradient(135deg,var(--yaraci-sky),var(--yaraci-link));color:#fff}
+    .btn-danger{background:var(--danger-grad);color:#fff}
+    .btn-ghost{grid-column:1/-1;background:var(--yaraci-sky-bg);color:var(--yaraci-link)}
+    .footer{margin-top:18px;font-size:.74rem;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center;border-top:1px solid #f1f5f9;padding-top:12px}
   </style>
 </head>
 <body>
   <div class="card">
     <div class="brand-bar">
       <div class="brand-left">
-        <img src="https://course.yaracienglish.com/assets/images/logo/logo.png" alt="Yaraci English" class="brand-logo" onerror="this.style.display='none'" />
+        <img src="https://course.yaracienglish.com/logo/yaraci.png" alt="Yaraci English" class="brand-logo" onerror="this.style.display='none'" />
         <div class="brand-text">
           <h1>Yaraci English</h1>
           <small>WhatsApp Gateway</small>
