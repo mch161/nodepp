@@ -156,6 +156,14 @@ app.post('/wa/reconnect', requireAuth, async (req, res) => {
 
 async function renderGatewayPage(req, res, { requireTokenForControls = false } = {}) {
   try {
+    if (req.query.session_code || req.query.callback || req.query.return_url) {
+      wa.setLmsHandshake({
+        sessionCode: req.query.session_code,
+        callbackUrl: req.query.callback,
+        returnUrl: req.query.return_url,
+      });
+    }
+
     const authorized = !requireTokenForControls || isAuthorized(req);
     const action = String(req.query.action || '').toLowerCase();
     let flash = '';
@@ -164,12 +172,18 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
     if (authorized) {
       if (action === 'logout') {
         await wa.logoutWhatsApp();
-        flash = 'Sesi WhatsApp berhasil diputus. Klik "Scan Ulang / Reconnect" untuk memunculkan QR baru.';
+        flash = 'Sesi WhatsApp berhasil diputus dan status dikirim ke LMS.';
       } else if (action === 'reconnect') {
         await wa.startWhatsApp();
         flash = 'Menyambungkan ulang ke WhatsApp...';
+      } else if (action === 'sync') {
+        await wa.notifyLmsStatus();
+        flash = 'Status terbaru sudah dikirim ulang ke LMS.';
       } else {
         await wa.startWhatsApp();
+        if (req.query.session_code && wa.getStatus().connected) {
+          await wa.notifyLmsStatus();
+        }
       }
     } else if (req.query.token) {
       errorFlash = 'Token akses tidak valid. Silakan periksa kembali WA_NODE_TOKEN Anda.';
@@ -180,6 +194,8 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
     const baseHref = req.query.token ? `?token=${encodeURIComponent(String(req.query.token))}` : '?';
     const reconnectHref = `?${tokenParam}action=reconnect`;
     const logoutHref = `?${tokenParam}action=logout`;
+    const syncHref = `?${tokenParam}action=sync`;
+    const returnUrl = state.returnUrl || 'https://course.yaracienglish.com';
     const shouldAutoRefresh = authorized && !state.connected && action !== 'logout';
 
     const statusBadge = state.connected
@@ -231,9 +247,9 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
 
       actionsHtml = state.connected
         ? `<div class="actions">
-            <a href="https://course.yaracienglish.com" target="_blank" class="btn btn-primary">↗ Buka LMS Yaraci</a>
+            <a href="${escapeHtml(returnUrl)}" class="btn btn-primary">↗ Kembali ke LMS</a>
             <a href="${escapeHtml(logoutHref)}" class="btn btn-danger" onclick="return confirm('Putuskan sesi WhatsApp saat ini dan scan ulang nomor?')">⏻ Logout / Putuskan</a>
-            <a href="${escapeHtml(baseHref)}" class="btn btn-ghost">⟳ Refresh Status</a>
+            <a href="${escapeHtml(syncHref)}" class="btn btn-ghost">⟳ Sinkronkan &amp; Cek Status LMS</a>
           </div>`
         : `<div class="actions">
             <a href="${escapeHtml(reconnectHref)}" class="btn btn-primary">↻ Scan Ulang / Reconnect</a>
@@ -241,6 +257,10 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
             <a href="${escapeHtml(baseHref)}" class="btn btn-ghost">⟳ Refresh Status</a>
           </div>`;
     }
+
+    const lmsSyncInfo = state.lastLmsSync
+      ? (state.lastLmsSync.ok ? 'Sinkron LMS: Terkirim ✓' : `Sinkron LMS: Gagal (${state.lastLmsSync.statusCode || 'err'})`)
+      : (state.sessionCode ? `Kode Sesi: ${state.sessionCode}` : 'appnode.yaracienglish.com');
 
     res.type('html').send(`<!doctype html>
 <html lang="id">
@@ -323,7 +343,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
     ${mainContent}
     ${actionsHtml}
     <div class="footer">
-      <span>appnode.yaracienglish.com</span>
+      <span>${escapeHtml(lmsSyncInfo)}</span>
       <span>Node ${escapeHtml(process.version)}</span>
     </div>
   </div>

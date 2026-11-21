@@ -19,6 +19,22 @@ let currentQrDataUrl = null;
 let connectedUser = null;
 let lastError = null;
 let reconnectTimer = null;
+let lmsSessionCode = null;
+let lmsCallbackUrl = LMS_WEBHOOK_URL;
+let lmsReturnUrl = 'https://course.yaracienglish.com';
+let lastLmsSync = null;
+
+function setLmsHandshake({ sessionCode, callbackUrl, returnUrl } = {}) {
+  if (sessionCode && typeof sessionCode === 'string') {
+    lmsSessionCode = sessionCode.trim().slice(0, 80);
+  }
+  if (callbackUrl && /^https?:\/\//i.test(String(callbackUrl).trim())) {
+    lmsCallbackUrl = String(callbackUrl).trim();
+  }
+  if (returnUrl && /^https?:\/\//i.test(String(returnUrl).trim())) {
+    lmsReturnUrl = String(returnUrl).trim();
+  }
+}
 
 function formatDeviceLabel(user) {
   if (!user || !user.id) return null;
@@ -27,18 +43,19 @@ function formatDeviceLabel(user) {
 }
 
 async function notifyLmsStatus() {
-  const url = String(process.env.LMS_WEBHOOK_URL || LMS_WEBHOOK_URL || '').trim();
+  const url = String(lmsCallbackUrl || process.env.LMS_WEBHOOK_URL || LMS_WEBHOOK_URL || '').trim();
   if (!url || typeof fetch !== 'function') return;
 
   const token = String(process.env.SCRAPER_TOKEN || '').trim();
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { 'x-scraper-token': token } : {}),
       },
       body: JSON.stringify({
+        session_code: lmsSessionCode,
         status,
         connected: status === 'connected',
         user: connectedUser,
@@ -48,8 +65,9 @@ async function notifyLmsStatus() {
       }),
       signal: AbortSignal.timeout(8000),
     });
-  } catch {
-    // Non-fatal: LMS can also pull status directly via /wa/status
+    lastLmsSync = { ok: res.ok, statusCode: res.status, at: new Date().toISOString() };
+  } catch (err) {
+    lastLmsSync = { ok: false, statusCode: 0, error: err.message, at: new Date().toISOString() };
   }
 }
 
@@ -152,6 +170,9 @@ function getStatus() {
     hasQr: Boolean(currentQrDataUrl),
     qrDataUrl: currentQrDataUrl,
     lastError,
+    sessionCode: lmsSessionCode,
+    returnUrl: lmsReturnUrl,
+    lastLmsSync,
   };
 }
 
@@ -232,6 +253,8 @@ async function logoutWhatsApp() {
 module.exports = {
   startWhatsApp,
   getStatus,
+  setLmsHandshake,
+  notifyLmsStatus,
   sendText,
   sendBroadcast,
   logoutWhatsApp,
