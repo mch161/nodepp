@@ -10,6 +10,7 @@ const {
 } = require('@whiskeysockets/baileys');
 
 const AUTH_DIR = process.env.WA_AUTH_DIR || path.join(__dirname, 'wa-auth');
+const LMS_WEBHOOK_URL = process.env.LMS_WEBHOOK_URL || 'https://course.yaracienglish.com/api/wa-node/status-webhook';
 const logger = pino({ level: process.env.WA_LOG_LEVEL || 'silent' });
 
 let sock = null;
@@ -18,6 +19,39 @@ let currentQrDataUrl = null;
 let connectedUser = null;
 let lastError = null;
 let reconnectTimer = null;
+
+function formatDeviceLabel(user) {
+  if (!user || !user.id) return null;
+  const phone = String(user.id).split(':')[0].split('@')[0];
+  return user.name ? `${user.name} (+${phone})` : `+${phone}`;
+}
+
+async function notifyLmsStatus() {
+  const url = String(process.env.LMS_WEBHOOK_URL || LMS_WEBHOOK_URL || '').trim();
+  if (!url || typeof fetch !== 'function') return;
+
+  const token = String(process.env.SCRAPER_TOKEN || '').trim();
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'x-scraper-token': token } : {}),
+      },
+      body: JSON.stringify({
+        status,
+        connected: status === 'connected',
+        user: connectedUser,
+        device: formatDeviceLabel(connectedUser),
+        lastError,
+        updated_at: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    // Non-fatal: LMS can also pull status directly via /wa/status
+  }
+}
 
 function formatJid(rawPhone) {
   let digits = String(rawPhone || '').replace(/\D/g, '');
@@ -72,6 +106,7 @@ async function startWhatsApp() {
       status = 'qr';
       currentQrDataUrl = await QRCode.toDataURL(qr);
       connectedUser = null;
+      notifyLmsStatus();
     }
 
     if (connection === 'open') {
@@ -79,6 +114,7 @@ async function startWhatsApp() {
       currentQrDataUrl = null;
       lastError = null;
       connectedUser = sock.user ? { id: sock.user.id, name: sock.user.name || null } : null;
+      notifyLmsStatus();
     }
 
     if (connection === 'close') {
@@ -90,6 +126,7 @@ async function startWhatsApp() {
       connectedUser = null;
       sock = null;
       lastError = lastDisconnect?.error?.message || `Disconnected (code ${code || 'unknown'})`;
+      notifyLmsStatus();
 
       if (!shouldReconnect) {
         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -189,6 +226,7 @@ async function logoutWhatsApp() {
   currentQrDataUrl = null;
   connectedUser = null;
   fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+  await notifyLmsStatus();
 }
 
 module.exports = {
