@@ -113,13 +113,19 @@ function isAllowedGoogleUrl(targetUrl) {
   }
 }
 
+function resolveSessionId(req) {
+  return wa.sanitizeSessionId(req.query.session_id || req.body?.session_id || req.headers['x-wa-session'] || 'default');
+}
+
 app.get('/', async (req, res) => {
-  const waState = wa.getStatus();
+  const sessionId = resolveSessionId(req);
+  const waState = wa.getStatus(sessionId);
   const wantsJson = req.query.format === 'json' || (!req.accepts('html') && req.accepts('json'));
   if (wantsJson) {
     return res.json({
       ok: true,
       service: 'yaraci-node-scraper',
+      sessionId,
       whatsapp: waState.status,
     });
   }
@@ -177,10 +183,11 @@ app.get('/scrape', requireAuth, heavyLimiter, async (req, res) => {
 
 app.get('/wa/status', requireAuth, async (req, res) => {
   try {
+    const sessionId = resolveSessionId(req);
     if (req.query.start === '1') {
-      await wa.startWhatsApp();
+      await wa.startWhatsApp(sessionId);
     }
-    const { qrDataUrl, ...summary } = wa.getStatus();
+    const { qrDataUrl, ...summary } = wa.getStatus(sessionId);
     res.json({ ok: true, ...summary });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -203,8 +210,9 @@ function formatConnectedPhone(user) {
 
 app.post('/wa/reconnect', requireAuth, async (req, res) => {
   try {
-    await wa.startWhatsApp({ force: true });
-    const { qrDataUrl, ...summary } = wa.getStatus();
+    const sessionId = resolveSessionId(req);
+    await wa.startWhatsApp(sessionId, { force: true });
+    const { qrDataUrl, ...summary } = wa.getStatus(sessionId);
     res.json({ ok: true, ...summary });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -213,8 +221,9 @@ app.post('/wa/reconnect', requireAuth, async (req, res) => {
 
 async function renderGatewayPage(req, res, { requireTokenForControls = false } = {}) {
   try {
+    const sessionId = resolveSessionId(req);
     if (req.query.session_code || req.query.callback || req.query.return_url) {
-      wa.setLmsHandshake({
+      wa.setLmsHandshake(sessionId, {
         sessionCode: req.query.session_code,
         callbackUrl: req.query.callback,
         returnUrl: req.query.return_url,
@@ -228,33 +237,36 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
 
     if (authorized) {
       if (action === 'logout') {
-        await wa.logoutWhatsApp();
+        await wa.logoutWhatsApp(sessionId);
         flash = 'Sesi WhatsApp berhasil diputus dan status dikirim ke LMS.';
       } else if (action === 'reconnect') {
-        await wa.startWhatsApp({ force: true });
+        await wa.startWhatsApp(sessionId, { force: true });
         flash = 'Menyambungkan ulang ke WhatsApp...';
       } else if (action === 'sync') {
-        await wa.notifyLmsStatus();
+        await wa.notifyLmsStatus(sessionId);
         flash = 'Status terbaru sudah dikirim ulang ke LMS.';
       } else {
-        const current = wa.getStatus();
+        const current = wa.getStatus(sessionId);
         if (current.status === 'disconnected' && !current.lastError) {
-          await wa.startWhatsApp();
+          await wa.startWhatsApp(sessionId);
         }
-        if (req.query.session_code && wa.getStatus().connected) {
-          await wa.notifyLmsStatus();
+        if (req.query.session_code && wa.getStatus(sessionId).connected) {
+          await wa.notifyLmsStatus(sessionId);
         }
       }
     } else if (req.query.token) {
       errorFlash = 'Token akses tidak valid. Silakan periksa kembali WA_NODE_TOKEN Anda.';
     }
 
-    const state = wa.getStatus();
-    const tokenParam = req.query.token ? `token=${encodeURIComponent(String(req.query.token))}&` : '';
-    const baseHref = req.query.token ? `?token=${encodeURIComponent(String(req.query.token))}` : '?';
-    const reconnectHref = `?${tokenParam}action=reconnect`;
-    const logoutHref = `?${tokenParam}action=logout`;
-    const syncHref = `?${tokenParam}action=sync`;
+    const state = wa.getStatus(sessionId);
+    const baseParams = [];
+    if (req.query.token) baseParams.push(`token=${encodeURIComponent(String(req.query.token))}`);
+    if (sessionId !== 'default') baseParams.push(`session_id=${encodeURIComponent(sessionId)}`);
+    const baseQueryPrefix = baseParams.length ? `${baseParams.join('&')}&` : '';
+    const baseHref = baseParams.length ? `?${baseParams.join('&')}` : '?';
+    const reconnectHref = `?${baseQueryPrefix}action=reconnect`;
+    const logoutHref = `?${baseQueryPrefix}action=logout`;
+    const syncHref = `?${baseQueryPrefix}action=sync`;
     const returnUrl = state.returnUrl || 'https://course.yaracienglish.com';
     const shouldAutoRefresh = authorized && !state.connected && action !== 'logout';
 
@@ -276,6 +288,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
           <h2>Yaraci English WhatsApp Gateway</h2>
           <p class="hint">Masukkan <b>Token Akses Gateway</b> untuk membuka QR Code, Scan Ulang, dan kontrol Logout.</p>
           <form method="GET" action="/" class="token-form">
+            ${sessionId !== 'default' ? `<input type="hidden" name="session_id" value="${escapeHtml(sessionId)}" />` : ''}
             <input type="password" name="token" placeholder="Masukkan WA_NODE_TOKEN..." required autocomplete="off" />
             <button type="submit" class="btn btn-primary" style="width:100%">Masuk ke Konsol Scan QR &rarr;</button>
           </form>
@@ -418,7 +431,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
       var initialHasQr = ${JSON.stringify(Boolean(state.qrDataUrl))};
       var initialQrVersion = ${Number(state.qrVersion || 0)};
       var initialError = ${JSON.stringify(state.lastError || '')};
-      var statusUrl = '/wa/status' + (${req.query.token ? JSON.stringify('?token=' + String(req.query.token)) : "''"});
+      var statusUrl = '/wa/status' + (${JSON.stringify(baseHref === '?' ? '' : baseHref)});
       var baseUrl = ${JSON.stringify(baseHref)};
       setInterval(function () {
         fetch(statusUrl, { credentials: 'same-origin' })
@@ -449,7 +462,8 @@ app.get('/wa/qr', requireAuth, async (req, res) => renderGatewayPage(req, res, {
 
 app.post('/wa/send', requireAuth, heavyLimiter, async (req, res) => {
   try {
-    const result = await wa.sendText(req.body?.phone, req.body?.message, req.body?.mediaUrl || null);
+    const sessionId = resolveSessionId(req);
+    const result = await wa.sendText(req.body?.phone, req.body?.message, req.body?.mediaUrl || null, sessionId);
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message });
@@ -458,13 +472,16 @@ app.post('/wa/send', requireAuth, heavyLimiter, async (req, res) => {
 
 app.post('/wa/broadcast', requireAuth, heavyLimiter, async (req, res) => {
   try {
+    const sessionId = resolveSessionId(req);
     const results = await wa.sendBroadcast(req.body?.phones, req.body?.message, {
       delayMinMs: req.body?.delayMinMs,
       delayMaxMs: req.body?.delayMaxMs,
+      sessionId,
     });
     const sent = results.filter((r) => r.ok).length;
     res.json({
       ok: true,
+      sessionId,
       total: results.length,
       sent,
       failed: results.length - sent,
@@ -476,8 +493,9 @@ app.post('/wa/broadcast', requireAuth, heavyLimiter, async (req, res) => {
 });
 
 app.post('/wa/logout', requireAuth, async (req, res) => {
-  await wa.logoutWhatsApp();
-  res.json({ ok: true, status: 'disconnected' });
+  const sessionId = resolveSessionId(req);
+  await wa.logoutWhatsApp(sessionId);
+  res.json({ ok: true, sessionId, status: 'disconnected' });
 });
 
 app.use((req, res) => {
