@@ -16,6 +16,7 @@ const logger = pino({ level: process.env.WA_LOG_LEVEL || 'silent' });
 let sock = null;
 let status = 'disconnected'; // disconnected | connecting | qr | connected
 let currentQrDataUrl = null;
+let qrVersion = 0;
 let connectedUser = null;
 let lastError = null;
 let reconnectTimer = null;
@@ -162,6 +163,7 @@ async function startWhatsApp({ force = false } = {}) {
     }
     status = 'disconnected';
     currentQrDataUrl = null;
+    qrVersion = 0;
     startPromise = null;
   }
 
@@ -202,6 +204,7 @@ async function startWhatsApp({ force = false } = {}) {
         printQRInTerminal: false,
         browser: ['Yaraci Course', 'Chrome', '120.0.0'],
         connectTimeoutMs: 20000,
+        syncFullHistory: false,
       };
       if (version) {
         socketConfig.version = version;
@@ -234,6 +237,7 @@ async function startWhatsApp({ force = false } = {}) {
           clearTimeout(connectTimeout);
           status = 'qr';
           currentQrDataUrl = await QRCode.toDataURL(qr);
+          qrVersion += 1;
           connectedUser = null;
           lastError = null;
           notifyLmsStatus();
@@ -243,6 +247,7 @@ async function startWhatsApp({ force = false } = {}) {
           clearTimeout(connectTimeout);
           status = 'connected';
           currentQrDataUrl = null;
+          qrVersion = 0;
           lastError = null;
           connectedUser = currentSock.user ? { id: currentSock.user.id, name: currentSock.user.name || null } : null;
           notifyLmsStatus();
@@ -255,6 +260,7 @@ async function startWhatsApp({ force = false } = {}) {
 
           status = 'disconnected';
           currentQrDataUrl = null;
+          qrVersion = 0;
           connectedUser = null;
           sock = null;
           lastError = lastDisconnect?.error?.message || `Disconnected (code ${code || 'unknown'})`;
@@ -263,13 +269,14 @@ async function startWhatsApp({ force = false } = {}) {
           if (!shouldReconnect) {
             fs.rmSync(AUTH_DIR, { recursive: true, force: true });
           } else {
+            const delayMs = code === DisconnectReason.restartRequired ? 1000 : 5000;
             clearTimeout(reconnectTimer);
             reconnectTimer = setTimeout(() => {
               startWhatsApp().catch((err) => {
                 status = 'disconnected';
                 lastError = err.message;
               });
-            }, 5000);
+            }, delayMs);
           }
         }
       });
@@ -296,6 +303,7 @@ function getStatus() {
     connected: status === 'connected',
     user: connectedUser,
     hasQr: Boolean(currentQrDataUrl),
+    qrVersion,
     qrDataUrl: currentQrDataUrl,
     lastError,
     sessionCode: lmsSessionCode,
@@ -392,6 +400,7 @@ async function logoutWhatsApp() {
   }
   status = 'disconnected';
   currentQrDataUrl = null;
+  qrVersion = 0;
   connectedUser = null;
   lastError = null;
   fs.rmSync(AUTH_DIR, { recursive: true, force: true });

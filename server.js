@@ -380,6 +380,9 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
     h2{margin:6px 0;font-size:1.18rem;color:var(--text-heading)}
     .hint{margin:6px 0 0;color:var(--text-muted);font-size:.85rem;line-height:1.55}
     .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:22px;padding-top:18px;border-top:1px solid #e5e7eb}
+    .token-form{display:flex;flex-direction:column;gap:12px;margin-top:18px}
+    .token-form input{width:100%;padding:12px 14px;border:1.5px solid #cbd5e1;border-radius:12px;font-size:.9rem;outline:none;transition:border-color .15s,box-shadow .15s}
+    .token-form input:focus{border-color:var(--yaraci-sky);box-shadow:0 0 0 3px rgba(14,165,233,.18)}
     .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:11px 14px;border-radius:12px;font-size:.84rem;font-weight:700;text-decoration:none;border:none;cursor:pointer;transition:transform .15s,opacity .15s}
     .btn:hover{transform:translateY(-1px);opacity:.94}
     .btn-primary{background:linear-gradient(135deg,var(--yaraci-sky),var(--yaraci-link));color:#fff}
@@ -413,6 +416,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
     (function () {
       var initialStatus = ${JSON.stringify(state.status)};
       var initialHasQr = ${JSON.stringify(Boolean(state.qrDataUrl))};
+      var initialQrVersion = ${Number(state.qrVersion || 0)};
       var initialError = ${JSON.stringify(state.lastError || '')};
       var statusUrl = '/wa/status' + (${req.query.token ? JSON.stringify('?token=' + String(req.query.token)) : "''"});
       var baseUrl = ${JSON.stringify(baseHref)};
@@ -424,6 +428,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
             if (
               data.status !== initialStatus ||
               Boolean(data.hasQr) !== initialHasQr ||
+              Number(data.qrVersion || 0) !== initialQrVersion ||
               (data.lastError || '') !== initialError
             ) {
               window.location.href = baseUrl;
