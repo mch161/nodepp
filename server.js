@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // Load .env from the same directory if present (useful when hosting has no Env UI)
 const envPath = path.join(__dirname, '.env');
@@ -23,16 +24,73 @@ const wa = require('./whatsapp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const TOKEN = process.env.SCRAPER_TOKEN || '';
+const TOKEN = String(process.env.SCRAPER_TOKEN || '').trim();
+const ALLOW_UNAUTHENTICATED = process.env.ALLOW_UNAUTHENTICATED === 'true';
 
-app.use(express.json({ limit: '1mb' }));
+if (!TOKEN && !ALLOW_UNAUTHENTICATED) {
+  console.warn('[SECURITY] SCRAPER_TOKEN is not set. Protected endpoints will reject all requests until SCRAPER_TOKEN is configured.');
+}
+
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '256kb' }));
+
+// Security headers
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'self' https://course.yaracienglish.com");
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+// Lightweight in-memory rate limiter per IP
+const rateBuckets = new Map();
+function createRateLimiter({ windowMs = 60_000, max = 60 } = {}) {
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = `${req.ip || 'unknown'}:${req.baseUrl || ''}${req.path}`;
+    let bucket = rateBuckets.get(key);
+    if (!bucket || now - bucket.start >= windowMs) {
+      bucket = { start: now, count: 0 };
+      rateBuckets.set(key, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > max) {
+      return res.status(429).json({ ok: false, error: 'Too many requests' });
+    }
+    return next();
+  };
+}
+
+// Periodically prune expired rate-limit entries
+setInterval(() => {
+  const cutoff = Date.now() - 120_000;
+  for (const [k, v] of rateBuckets.entries()) {
+    if (v.start < cutoff) rateBuckets.delete(k);
+  }
+}, 120_000).unref();
+
+const generalLimiter = createRateLimiter({ windowMs: 60_000, max: 120 });
+const heavyLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
+app.use(generalLimiter);
+
+function safeTokenEqual(a, b) {
+  const bufA = Buffer.from(String(a), 'utf8');
+  const bufB = Buffer.from(String(b), 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 function isAuthorized(req) {
   if (!TOKEN) {
-    return true;
+    return ALLOW_UNAUTHENTICATED;
   }
-  const provided = req.headers['x-scraper-token'] || req.query.token || '';
-  return provided === TOKEN;
+  const provided = String(req.headers['x-scraper-token'] || req.query.token || '').trim();
+  if (!provided) return false;
+  return safeTokenEqual(provided, TOKEN);
 }
 
 function requireAuth(req, res, next) {
@@ -62,15 +120,14 @@ app.get('/', async (req, res) => {
     return res.json({
       ok: true,
       service: 'yaraci-node-scraper',
-      node: process.version,
       whatsapp: waState.status,
     });
   }
 
-  return renderGatewayPage(req, res, { requireTokenForControls: false });
+  return renderGatewayPage(req, res, { requireTokenForControls: true });
 });
 
-app.get('/health', async (req, res) => {
+app.get('/health', requireAuth, heavyLimiter, async (req, res) => {
   let browser;
   try {
     browser = await puppeteer.launch({
@@ -88,7 +145,7 @@ app.get('/health', async (req, res) => {
   }
 });
 
-app.get('/scrape', requireAuth, async (req, res) => {
+app.get('/scrape', requireAuth, heavyLimiter, async (req, res) => {
   const targetUrl = String(req.query.url || '');
   if (!isAllowedGoogleUrl(targetUrl)) {
     return res.status(400).json({ ok: false, error: 'Invalid or disallowed Google Search URL' });
@@ -146,7 +203,7 @@ function formatConnectedPhone(user) {
 
 app.post('/wa/reconnect', requireAuth, async (req, res) => {
   try {
-    await wa.startWhatsApp();
+    await wa.startWhatsApp({ force: true });
     const { qrDataUrl, ...summary } = wa.getStatus();
     res.json({ ok: true, ...summary });
   } catch (err) {
@@ -174,13 +231,16 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
         await wa.logoutWhatsApp();
         flash = 'Sesi WhatsApp berhasil diputus dan status dikirim ke LMS.';
       } else if (action === 'reconnect') {
-        await wa.startWhatsApp();
+        await wa.startWhatsApp({ force: true });
         flash = 'Menyambungkan ulang ke WhatsApp...';
       } else if (action === 'sync') {
         await wa.notifyLmsStatus();
         flash = 'Status terbaru sudah dikirim ulang ke LMS.';
       } else {
-        await wa.startWhatsApp();
+        const current = wa.getStatus();
+        if (current.status === 'disconnected' && !current.lastError) {
+          await wa.startWhatsApp();
+        }
         if (req.query.session_code && wa.getStatus().connected) {
           await wa.notifyLmsStatus();
         }
@@ -215,7 +275,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
           <div class="wa-icon-circle">WA</div>
           <h2>Yaraci English WhatsApp Gateway</h2>
           <p class="hint">Masukkan <b>Token Akses Gateway</b> untuk membuka QR Code, Scan Ulang, dan kontrol Logout.</p>
-          <form method="GET" action="/wa/qr" class="token-form">
+          <form method="GET" action="/" class="token-form">
             <input type="password" name="token" placeholder="Masukkan WA_NODE_TOKEN..." required autocomplete="off" />
             <button type="submit" class="btn btn-primary" style="width:100%">Masuk ke Konsol Scan QR &rarr;</button>
           </form>
@@ -242,7 +302,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
           : `<div class="loading-box">
               <div class="spinner"></div>
               <h2>${action === 'logout' ? 'Sesi WhatsApp Diputus' : 'Menyiapkan Koneksi WhatsApp...'}</h2>
-              <p class="hint">${state.lastError ? escapeHtml(state.lastError) : 'Status: ' + escapeHtml(state.status) + (shouldAutoRefresh ? ' • Halaman refresh otomatis tiap 5 detik.' : '')}</p>
+              <p class="hint">${state.lastError ? escapeHtml(state.lastError) : 'Status: ' + escapeHtml(state.status) + (shouldAutoRefresh ? ' • Memantau status otomatis...' : '')}</p>
             </div>`;
 
       actionsHtml = state.connected
@@ -258,16 +318,18 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
           </div>`;
     }
 
-    const lmsSyncInfo = state.lastLmsSync
-      ? (state.lastLmsSync.ok ? 'Sinkron LMS: Terkirim ✓' : `Sinkron LMS: Gagal (${state.lastLmsSync.statusCode || 'err'})`)
-      : (state.sessionCode ? `Kode Sesi: ${state.sessionCode}` : 'appnode.yaracienglish.com');
+    const lmsSyncInfo = !authorized
+      ? 'appnode.yaracienglish.com'
+      : state.lastLmsSync
+        ? (state.lastLmsSync.ok ? 'Sinkron LMS: Terkirim ✓' : `Sinkron LMS: Gagal (${state.lastLmsSync.statusCode || 'err'})`)
+        : (state.sessionCode ? `Kode Sesi: ${state.sessionCode}` : 'appnode.yaracienglish.com');
 
     res.type('html').send(`<!doctype html>
 <html lang="id">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  ${shouldAutoRefresh ? `<meta http-equiv="refresh" content="5;url=${escapeHtml(baseHref)}" />` : ''}
+  ${shouldAutoRefresh ? `<noscript><meta http-equiv="refresh" content="5;url=${escapeHtml(baseHref)}" /></noscript>` : ''}
   <title>Yaraci English — WhatsApp Gateway</title>
   <style>
     :root{
@@ -347,6 +409,30 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
       <span>Node ${escapeHtml(process.version)}</span>
     </div>
   </div>
+  ${shouldAutoRefresh ? `<script>
+    (function () {
+      var initialStatus = ${JSON.stringify(state.status)};
+      var initialHasQr = ${JSON.stringify(Boolean(state.qrDataUrl))};
+      var initialError = ${JSON.stringify(state.lastError || '')};
+      var statusUrl = '/wa/status' + (${req.query.token ? JSON.stringify('?token=' + String(req.query.token)) : "''"});
+      var baseUrl = ${JSON.stringify(baseHref)};
+      setInterval(function () {
+        fetch(statusUrl, { credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            if (!data || !data.ok) return;
+            if (
+              data.status !== initialStatus ||
+              Boolean(data.hasQr) !== initialHasQr ||
+              (data.lastError || '') !== initialError
+            ) {
+              window.location.href = baseUrl;
+            }
+          })
+          .catch(function () {});
+      }, 2500);
+    })();
+  </script>` : ''}
 </body>
 </html>`);
   } catch (err) {
@@ -356,7 +442,7 @@ async function renderGatewayPage(req, res, { requireTokenForControls = false } =
 
 app.get('/wa/qr', requireAuth, async (req, res) => renderGatewayPage(req, res, { requireTokenForControls: false }));
 
-app.post('/wa/send', requireAuth, async (req, res) => {
+app.post('/wa/send', requireAuth, heavyLimiter, async (req, res) => {
   try {
     const result = await wa.sendText(req.body?.phone, req.body?.message, req.body?.mediaUrl || null);
     res.json({ ok: true, ...result });
@@ -365,7 +451,7 @@ app.post('/wa/send', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/wa/broadcast', requireAuth, async (req, res) => {
+app.post('/wa/broadcast', requireAuth, heavyLimiter, async (req, res) => {
   try {
     const results = await wa.sendBroadcast(req.body?.phones, req.body?.message, {
       delayMinMs: req.body?.delayMinMs,
@@ -387,6 +473,16 @@ app.post('/wa/broadcast', requireAuth, async (req, res) => {
 app.post('/wa/logout', requireAuth, async (req, res) => {
   await wa.logoutWhatsApp();
   res.json({ ok: true, status: 'disconnected' });
+});
+
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: 'Not found' });
+});
+
+app.use((err, req, res, next) => {
+  console.error('[Express Error]', err && err.message ? err.message : err);
+  if (res.headersSent) return next(err);
+  return res.status(500).json({ ok: false, error: 'Internal server error' });
 });
 
 app.listen(PORT, () => {

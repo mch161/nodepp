@@ -19,19 +19,72 @@ let currentQrDataUrl = null;
 let connectedUser = null;
 let lastError = null;
 let reconnectTimer = null;
+let connectTimeout = null;
+let startPromise = null;
 let lmsSessionCode = null;
 let lmsCallbackUrl = LMS_WEBHOOK_URL;
 let lmsReturnUrl = 'https://course.yaracienglish.com';
 let lastLmsSync = null;
 
+const ALLOWED_LMS_HOSTS = new Set(
+  String(process.env.ALLOWED_LMS_HOSTS || 'course.yaracienglish.com,yaracienglish.com,localhost,127.0.0.1')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+function isTrustedLmsUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    const host = parsed.hostname.toLowerCase();
+    const isLocal = host === 'localhost' || host === '127.0.0.1';
+    if (parsed.protocol !== 'https:' && !(isLocal && parsed.protocol === 'http:')) {
+      return false;
+    }
+    return ALLOWED_LMS_HOSTS.has(host) || host.endsWith('.yaracienglish.com');
+  } catch {
+    return false;
+  }
+}
+
+function isSafePublicMediaUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '::1' ||
+      host === '0.0.0.0' ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      host.startsWith('169.254.') ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal')
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function setLmsHandshake({ sessionCode, callbackUrl, returnUrl } = {}) {
   if (sessionCode && typeof sessionCode === 'string') {
-    lmsSessionCode = sessionCode.trim().slice(0, 80);
+    const cleaned = sessionCode.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+    if (cleaned) {
+      lmsSessionCode = cleaned;
+    }
   }
-  if (callbackUrl && /^https?:\/\//i.test(String(callbackUrl).trim())) {
+  if (callbackUrl && isTrustedLmsUrl(callbackUrl)) {
     lmsCallbackUrl = String(callbackUrl).trim();
   }
-  if (returnUrl && /^https?:\/\//i.test(String(returnUrl).trim())) {
+  if (returnUrl && isTrustedLmsUrl(returnUrl)) {
     lmsReturnUrl = String(returnUrl).trim();
   }
 }
@@ -95,71 +148,146 @@ function randomDelay(minMs, maxMs) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-async function startWhatsApp() {
+async function startWhatsApp({ force = false } = {}) {
+  if (force) {
+    clearTimeout(reconnectTimer);
+    clearTimeout(connectTimeout);
+    if (sock) {
+      try {
+        sock.end(undefined);
+      } catch {
+        // ignore close errors
+      }
+      sock = null;
+    }
+    status = 'disconnected';
+    currentQrDataUrl = null;
+    startPromise = null;
+  }
+
+  if (startPromise) {
+    return startPromise;
+  }
+
   if (sock && (status === 'connecting' || status === 'connected' || status === 'qr')) {
     return getStatus();
   }
 
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
-  status = 'connecting';
-  lastError = null;
+  startPromise = (async () => {
+    clearTimeout(reconnectTimer);
+    clearTimeout(connectTimeout);
 
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
-
-  sock = makeWASocket({
-    version,
-    auth: state,
-    logger,
-    printQRInTerminal: false,
-    browser: ['Yaraci Course', 'Chrome', '120.0.0'],
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      status = 'qr';
-      currentQrDataUrl = await QRCode.toDataURL(qr);
-      connectedUser = null;
-      notifyLmsStatus();
-    }
-
-    if (connection === 'open') {
-      status = 'connected';
-      currentQrDataUrl = null;
+    try {
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
+      status = 'connecting';
       lastError = null;
-      connectedUser = sock.user ? { id: sock.user.id, name: sock.user.name || null } : null;
-      notifyLmsStatus();
-    }
 
-    if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-
-      status = 'disconnected';
-      currentQrDataUrl = null;
-      connectedUser = null;
-      sock = null;
-      lastError = lastDisconnect?.error?.message || `Disconnected (code ${code || 'unknown'})`;
-      notifyLmsStatus();
-
-      if (!shouldReconnect) {
-        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-      } else {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(() => {
-          startWhatsApp().catch((err) => {
-            lastError = err.message;
-          });
-        }, 5000);
+      const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+      let version;
+      try {
+        const res = await Promise.race([
+          fetchLatestBaileysVersion(),
+          sleep(5000).then(() => {
+            throw new Error('Timeout fetching Baileys version');
+          }),
+        ]);
+        version = res.version;
+      } catch {
+        version = undefined;
       }
-    }
-  });
 
-  return getStatus();
+      const socketConfig = {
+        auth: state,
+        logger,
+        printQRInTerminal: false,
+        browser: ['Yaraci Course', 'Chrome', '120.0.0'],
+        connectTimeoutMs: 20000,
+      };
+      if (version) {
+        socketConfig.version = version;
+      }
+
+      const currentSock = makeWASocket(socketConfig);
+      sock = currentSock;
+
+      connectTimeout = setTimeout(() => {
+        if (sock === currentSock && status === 'connecting') {
+          status = 'disconnected';
+          lastError = 'Koneksi ke WhatsApp timeout. Silakan klik Scan Ulang / Reconnect atau Reset Sesi.';
+          try {
+            currentSock.end(undefined);
+          } catch {
+            // ignore
+          }
+          sock = null;
+          notifyLmsStatus();
+        }
+      }, 25000);
+
+      currentSock.ev.on('creds.update', saveCreds);
+
+      currentSock.ev.on('connection.update', async (update) => {
+        if (sock !== currentSock) return;
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+          clearTimeout(connectTimeout);
+          status = 'qr';
+          currentQrDataUrl = await QRCode.toDataURL(qr);
+          connectedUser = null;
+          lastError = null;
+          notifyLmsStatus();
+        }
+
+        if (connection === 'open') {
+          clearTimeout(connectTimeout);
+          status = 'connected';
+          currentQrDataUrl = null;
+          lastError = null;
+          connectedUser = currentSock.user ? { id: currentSock.user.id, name: currentSock.user.name || null } : null;
+          notifyLmsStatus();
+        }
+
+        if (connection === 'close') {
+          clearTimeout(connectTimeout);
+          const code = lastDisconnect?.error?.output?.statusCode;
+          const shouldReconnect = code !== DisconnectReason.loggedOut;
+
+          status = 'disconnected';
+          currentQrDataUrl = null;
+          connectedUser = null;
+          sock = null;
+          lastError = lastDisconnect?.error?.message || `Disconnected (code ${code || 'unknown'})`;
+          notifyLmsStatus();
+
+          if (!shouldReconnect) {
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+          } else {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(() => {
+              startWhatsApp().catch((err) => {
+                status = 'disconnected';
+                lastError = err.message;
+              });
+            }, 5000);
+          }
+        }
+      });
+
+      return getStatus();
+    } catch (err) {
+      clearTimeout(connectTimeout);
+      status = 'disconnected';
+      sock = null;
+      lastError = err.message || 'Gagal memulai koneksi WhatsApp';
+      notifyLmsStatus();
+      return getStatus();
+    } finally {
+      startPromise = null;
+    }
+  })();
+
+  return startPromise;
 }
 
 function getStatus() {
@@ -194,6 +322,9 @@ async function sendText(phone, message, mediaUrl = null) {
   let payload = { text };
   if (mediaUrl) {
     const cleanUrl = String(mediaUrl).trim();
+    if (!isSafePublicMediaUrl(cleanUrl)) {
+      throw new Error('URL media tidak valid atau tidak diizinkan');
+    }
     if (/\.(jpg|jpeg|png|webp)(\?|$)/i.test(cleanUrl)) {
       payload = { image: { url: cleanUrl }, caption: text };
     } else if (/\.pdf(\?|$)/i.test(cleanUrl)) {
@@ -203,7 +334,16 @@ async function sendText(phone, message, mediaUrl = null) {
     }
   }
 
-  const sent = await sock.sendMessage(jid, payload);
+  const sent = await (async () => {
+    try {
+      await sock.sendPresenceUpdate('composing', jid);
+      await sleep(randomDelay(1200, 2500));
+      await sock.sendPresenceUpdate('paused', jid);
+    } catch {
+      // Non-fatal if presence update is unavailable
+    }
+    return sock.sendMessage(jid, payload);
+  })();
   return {
     phone,
     jid,
@@ -239,13 +379,21 @@ async function sendBroadcast(phones, message, { delayMinMs = 5000, delayMaxMs = 
 
 async function logoutWhatsApp() {
   clearTimeout(reconnectTimer);
+  clearTimeout(connectTimeout);
+  startPromise = null;
   if (sock) {
     await sock.logout().catch(() => {});
+    try {
+      sock.end(undefined);
+    } catch {
+      // ignore
+    }
     sock = null;
   }
   status = 'disconnected';
   currentQrDataUrl = null;
   connectedUser = null;
+  lastError = null;
   fs.rmSync(AUTH_DIR, { recursive: true, force: true });
   await notifyLmsStatus();
 }
